@@ -1,804 +1,415 @@
-import 'dart:async';
-import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/scheduler.dart';
 
-void main() {
-  runApp(const WaterTrackerApp());
-}
+void main() => runApp(const MaterialApp(home: ProjectilePro(), debugShowCheckedModeBanner: false));
 
-class WaterTrackerApp extends StatelessWidget {
-  const WaterTrackerApp({Key? key}) : super(key: key);
+class ProjectilePro extends StatefulWidget {
+  const ProjectilePro({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Water Tracker',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-        scaffoldBackgroundColor: Colors.blue[50],
-        useMaterial3: true,
-      ),
-      home: const WaterTrackerHome(),
-    );
-  }
+  State<ProjectilePro> createState() => _ProjectileProState();
 }
 
-class WaterTrackerHome extends StatefulWidget {
-  const WaterTrackerHome({Key? key}) : super(key: key);
+class _ProjectileProState extends State<ProjectilePro> with SingleTickerProviderStateMixin {
+  // Physics parameters (SI units)
+  double v0 = 25.0; // initial speed (m/s)
+  double angleDeg = 45.0; // launch angle (degrees)
+  final double g = 9.8;
 
-  @override
-  State<WaterTrackerHome> createState() => _WaterTrackerHomeState();
-}
+  // Simulation state
+  bool isLaunched = false;
+  bool isPaused = false;
+  double t = 0.0; // current simulation time (s)
+  final List<Offset> pathPoints = []; // stores world coordinates (meters)
+  late final Ticker _ticker;
 
-class _WaterTrackerHomeState extends State<WaterTrackerHome> {
-  int dailyGoal = 2000; // ml
-  int totalConsumed = 0; // ml
-  List<WaterEntry> entries = [];
-  Timer? reminderTimer;
-  int reminderInterval = 30; // minutes
-  bool remindersEnabled = false;
-  final TextEditingController customAmountController = TextEditingController();
-  final TextEditingController goalController = TextEditingController();
-  final TextEditingController intervalController = TextEditingController();
+  // Visual mapping
+  double metersPerPixel = 1.0; // computed based on range and canvas size in build
 
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _ticker = createTicker(_onTick);
   }
 
   @override
   void dispose() {
-    reminderTimer?.cancel();
-    customAmountController.dispose();
-    goalController.dispose();
-    intervalController.dispose();
+    _ticker.dispose();
     super.dispose();
   }
 
-  // Simulate localStorage for DartPad
-  final Map<String, String> _localStorage = {};
+  void _onTick(Duration elapsed) {
+    if (!isLaunched || isPaused) return;
 
-  void _saveData() {
-    final data = {
-      'dailyGoal': dailyGoal,
-      'totalConsumed': totalConsumed,
-      'entries': entries.map((e) => e.toJson()).toList(),
-      'reminderInterval': reminderInterval,
-      'remindersEnabled': remindersEnabled,
-      'lastDate': DateTime.now().toIso8601String().split('T')[0],
-    };
-    _localStorage['waterTrackerData'] = jsonEncode(data);
-  }
+    // advance time by frame delta (seconds)
+    final double dt = 1 / 60; // fixed-step for predictable behavior
+    t += dt;
 
-  void _loadData() {
-    final storedData = _localStorage['waterTrackerData'];
-    if (storedData != null) {
-      final data = jsonDecode(storedData);
-      final lastDate = data['lastDate'] as String;
-      final today = DateTime.now().toIso8601String().split('T')[0];
+    final theta = angleDeg * pi / 180.0;
+    final vx = v0 * cos(theta);
+    final vy = v0 * sin(theta);
 
-      // Reset if it's a new day
-      if (lastDate != today) {
-        _resetDay();
-        return;
-      }
+    final x = vx * t;
+    final y = vy * t - 0.5 * g * t * t;
 
+    if (y < 0) {
+      // hit ground: stop and add final point at ground (y=0)
+      final double tGround = _timeOfFlight();
+      final double xGround = vx * tGround;
+      pathPoints.add(Offset(xGround, 0));
       setState(() {
-        dailyGoal = data['dailyGoal'] ?? 2000;
-        totalConsumed = data['totalConsumed'] ?? 0;
-        reminderInterval = data['reminderInterval'] ?? 30;
-        remindersEnabled = data['remindersEnabled'] ?? false;
-        entries = (data['entries'] as List)
-            .map((e) => WaterEntry.fromJson(e))
-            .toList();
+        isLaunched = false;
+        _ticker.stop();
       });
-
-      // Restart reminders if they were enabled
-      if (remindersEnabled) {
-        _startReminder();
-      }
+      return;
     }
-  }
 
-  void _addWater(int amount) {
     setState(() {
-      totalConsumed += amount;
-      entries.add(WaterEntry(amount: amount, timestamp: DateTime.now()));
+      pathPoints.add(Offset(x, y));
     });
-    _saveData();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Added ${amount}ml of water! 💧'),
-        duration: const Duration(seconds: 2),
-        backgroundColor: Colors.blue[700],
-      ),
-    );
   }
 
-  void _addCustomAmount() {
-    final amount = int.tryParse(customAmountController.text);
-    if (amount != null && amount > 0) {
-      _addWater(amount);
-      customAmountController.clear();
+  // Physics helpers
+  double _timeOfFlight() {
+    final theta = angleDeg * pi / 180.0;
+    return 2 * v0 * sin(theta) / g;
+  }
+
+  double _range() {
+    final theta = angleDeg * pi / 180.0;
+    return v0 * v0 * sin(2 * theta) / g;
+  }
+
+  double _maxHeight() {
+    final theta = angleDeg * pi / 180.0;
+    return (v0 * v0 * pow(sin(theta), 2)) / (2 * g);
+  }
+
+  void _launch() {
+    // reset path and time
+    pathPoints.clear();
+    t = 0.0;
+
+    setState(() {
+      isLaunched = true;
+      isPaused = false;
+    });
+
+    _ticker.start();
+  }
+
+  void _pauseResume() {
+    if (!isLaunched) return;
+    setState(() => isPaused = !isPaused);
+    if (isPaused) {
+      _ticker.stop();
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter a valid amount'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _ticker.start();
     }
   }
 
-  void _setDailyGoal() {
-    final goal = int.tryParse(goalController.text);
-    if (goal != null && goal > 0) {
-      setState(() {
-        dailyGoal = goal;
-      });
-      _saveData();
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Daily goal set to ${goal}ml'),
-          backgroundColor: Colors.green,
-        ),
-      );
-    }
-  }
-
-  void _updateReminderInterval(int newInterval) {
+  void _reset() {
+    _ticker.stop();
     setState(() {
-      reminderInterval = newInterval;
+      isLaunched = false;
+      isPaused = false;
+      t = 0.0;
+      pathPoints.clear();
     });
-    _saveData();
-    
-    // Restart timer with new interval if reminders are enabled
-    if (remindersEnabled) {
-      _startReminder();
-    }
   }
-
-  void _resetDay() {
-    setState(() {
-      totalConsumed = 0;
-      entries.clear();
-    });
-    _saveData();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Day reset! Start fresh 🌊'),
-        backgroundColor: Colors.orange,
-      ),
-    );
-  }
-
-  void _startReminder() {
-    reminderTimer?.cancel();
-    reminderTimer = Timer.periodic(
-      Duration(minutes: reminderInterval),
-      (timer) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: const Text('💧 Time to drink water! Stay hydrated! 💧'),
-              duration: const Duration(seconds: 4),
-              backgroundColor: Colors.blue[800],
-              action: SnackBarAction(
-                label: 'GOT IT',
-                textColor: Colors.white,
-                onPressed: () {},
-              ),
-            ),
-          );
-        }
-      },
-    );
-  }
-
-  void _stopReminder() {
-    reminderTimer?.cancel();
-  }
-
-  void _toggleReminder(bool value) {
-    setState(() {
-      remindersEnabled = value;
-    });
-    _saveData();
-    
-    if (value) {
-      _startReminder();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Reminders enabled (every $reminderInterval min)'),
-          backgroundColor: Colors.green,
-        ),
-      );
-    } else {
-      _stopReminder();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Reminders disabled'),
-          backgroundColor: Colors.grey,
-        ),
-      );
-    }
-  }
-
-  double get progress => dailyGoal > 0 ? (totalConsumed / dailyGoal).clamp(0.0, 1.0) : 0.0;
 
   @override
   Widget build(BuildContext context) {
+    final double timeOfFlight = _timeOfFlight().clamp(0.0, double.infinity);
+    final double rangeMeters = _range().clamp(0.0, double.infinity);
+    final double maxHeight = _maxHeight().clamp(0.0, double.infinity);
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('💧 Water Tracker'),
-        backgroundColor: Colors.blue[700],
-        foregroundColor: Colors.white,
-        elevation: 0,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => _showSettingsDialog(),
-          ),
-        ],
+        title: const Text('Projectile Pro'),
+        backgroundColor: Colors.deepPurple,
+        centerTitle: true,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Progress Card
-            Card(
-              elevation: 4,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  children: [
-                    Text(
-                      'Daily Progress',
-                      style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.blue[900],
-                          ),
-                    ),
-                    const SizedBox(height: 20),
-                    Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        SizedBox(
-                          width: 180,
-                          height: 180,
-                          child: CircularProgressIndicator(
-                            value: progress,
-                            strokeWidth: 12,
-                            backgroundColor: Colors.blue[100],
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              progress >= 1.0 ? Colors.green : Colors.blue,
-                            ),
-                          ),
-                        ),
-                        Column(
-                          children: [
-                            Text(
-                              '$totalConsumed ml',
-                              style: TextStyle(
-                                fontSize: 32,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.blue[900],
-                              ),
-                            ),
-                            Text(
-                              'of $dailyGoal ml',
-                              style: TextStyle(
-                                fontSize: 16,
-                                color: Colors.grey[600],
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              '${(progress * 100).toInt()}%',
-                              style: TextStyle(
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.blue[700],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    if (progress >= 1.0) ...[
-                      const SizedBox(height: 16),
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.green[100],
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: const Text(
-                          '🎉 Goal achieved! Great job!',
-                          style: TextStyle(
-                            color: Colors.green,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-
-            // Quick Add Buttons
-            Text(
-              'Quick Add',
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _QuickAddButton(
-                    amount: 200,
-                    onPressed: () => _addWater(200),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _QuickAddButton(
-                    amount: 250,
-                    onPressed: () => _addWater(250),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _QuickAddButton(
-                    amount: 300,
-                    onPressed: () => _addWater(300),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // Custom Amount
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Custom Amount',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.bold,
-                          ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: customAmountController,
-                            keyboardType: TextInputType.number,
-                            inputFormatters: [
-                              FilteringTextInputFormatter.digitsOnly,
-                            ],
-                            decoration: InputDecoration(
-                              hintText: 'Enter ml',
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 12,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        ElevatedButton(
-                          onPressed: _addCustomAmount,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.blue[700],
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 24,
-                              vertical: 16,
-                            ),
-                          ),
-                          child: const Text('Add'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // Reminder Section
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          'Reminders',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                fontWeight: FontWeight.bold,
-                              ),
-                        ),
-                        Switch(
-                          value: remindersEnabled,
-                          onChanged: _toggleReminder,
-                          // FIX: 'activeColor' is deprecated. Use 'activeThumbColor' instead.
-                          activeThumbColor: Colors.blue[700],
-                        ),
-                      ],
-                    ),
-                    if (remindersEnabled) ...[
-                      const SizedBox(height: 16),
-                      Text(
-                        'Remind me every:',
-                        style: TextStyle(
-                          color: Colors.grey[700],
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          _IntervalChip(
-                            label: '15 min',
-                            minutes: 15,
-                            isSelected: reminderInterval == 15,
-                            onSelected: () => _updateReminderInterval(15),
-                          ),
-                          _IntervalChip(
-                            label: '30 min',
-                            minutes: 30,
-                            isSelected: reminderInterval == 30,
-                            onSelected: () => _updateReminderInterval(30),
-                          ),
-                          _IntervalChip(
-                            label: '45 min',
-                            minutes: 45,
-                            isSelected: reminderInterval == 45,
-                            onSelected: () => _updateReminderInterval(45),
-                          ),
-                          _IntervalChip(
-                            label: '60 min',
-                            minutes: 60,
-                            isSelected: reminderInterval == 60,
-                            onSelected: () => _updateReminderInterval(60),
-                          ),
-                          _IntervalChip(
-                            label: '90 min',
-                            minutes: 90,
-                            isSelected: reminderInterval == 90,
-                            onSelected: () => _updateReminderInterval(90),
-                          ),
-                          _IntervalChip(
-                            label: '120 min',
-                            minutes: 120,
-                            isSelected: reminderInterval == 120,
-                            onSelected: () => _updateReminderInterval(120),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: intervalController,
-                              keyboardType: TextInputType.number,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                              ],
-                              decoration: InputDecoration(
-                                hintText: 'Custom (minutes)',
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 8,
-                                ),
-                                isDense: true,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          ElevatedButton(
-                            onPressed: () {
-                              final interval = int.tryParse(intervalController.text);
-                              if (interval != null && interval > 0) {
-                                _updateReminderInterval(interval);
-                                intervalController.clear();
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Reminder set to $interval minutes'),
-                                    backgroundColor: Colors.green,
-                                  ),
-                                );
-                              } else {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Enter a valid number'),
-                                    backgroundColor: Colors.red,
-                                  ),
-                                );
-                              }
-                            },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.blue[700],
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 12,
-                              ),
-                            ),
-                            child: const Text('Set'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-
-            // Today's Log
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Today\'s Log',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
-                ),
-                TextButton.icon(
-                  onPressed: _showResetConfirmation,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Reset Day'),
-                  style: TextButton.styleFrom(
-                    foregroundColor: Colors.red,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            entries.isEmpty
-                ? Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(32),
-                      child: Center(
-                        child: Column(
-                          children: [
-                            Icon(
-                              Icons.water_drop_outlined,
-                              size: 64,
-                              color: Colors.grey[400],
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'No entries yet today',
-                              style: TextStyle(
-                                color: Colors.grey[600],
-                                fontSize: 16,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  )
-                : ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: entries.length,
-                    itemBuilder: (context, index) {
-                      final entry = entries[entries.length - 1 - index];
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: Colors.blue[100],
-                            child: Icon(
-                              Icons.water_drop,
-                              color: Colors.blue[700],
-                            ),
-                          ),
-                          title: Text(
-                            '${entry.amount} ml',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          subtitle: Text(
-                            entry.formattedTime,
-                            style: TextStyle(color: Colors.grey[600]),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showSettingsDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Daily Goal'),
-        content: TextField(
-          controller: goalController..text = dailyGoal.toString(),
-          keyboardType: TextInputType.number,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          decoration: const InputDecoration(
-            labelText: 'Goal (ml)',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: _setDailyGoal,
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showResetConfirmation() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Reset Day'),
-        content: const Text(
-          'Are you sure you want to reset today\'s data? This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              _resetDay();
-              Navigator.pop(context);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Reset'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _QuickAddButton extends StatelessWidget {
-  final int amount;
-  final VoidCallback onPressed;
-
-  const _QuickAddButton({
-    required this.amount,
-    required this.onPressed,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ElevatedButton(
-      onPressed: onPressed,
-      style: ElevatedButton.styleFrom(
-        backgroundColor: Colors.blue[600],
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(vertical: 20),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
-        elevation: 3,
-      ),
-      child: Column(
+      backgroundColor: Colors.grey.shade900,
+      body: Column(
         children: [
-          const Icon(Icons.water_drop, size: 32),
-          const SizedBox(height: 8),
-          Text(
-            '$amount ml',
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
+          // Top: Visualization area
+          Expanded(
+            flex: 6,
+            child: LayoutBuilder(builder: (context, constraints) {
+              final canvasW = constraints.maxWidth;
+              final canvasH = constraints.maxHeight;
+
+              // compute metersPerPixel so the entire range fits nicely in width with margins
+              final double margin = 20.0;
+              final double usableW = max(100, canvasW - 2 * margin);
+              final double targetRange = max(rangeMeters, 10.0);
+              metersPerPixel = (targetRange + 2) / (usableW / 1.0); // extra margin in meters per pixel
+              // But ensure vertical fits as well: adjust if max height would overflow
+              final double topSpaceMeters = maxHeight + 2.0; // add margin above
+              final double usableH = max(100, canvasH - 2 * margin);
+              final double metersPerPixelY = (topSpaceMeters) / (usableH / 1.0);
+              // pick the larger metersPerPixel to ensure fit both horizontally and vertically
+              metersPerPixel = max(metersPerPixel, metersPerPixelY);
+
+              return Container(
+                margin: EdgeInsets.all(margin),
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: CustomPaint(
+                  painter: _ProjectilePainter(
+                    pathPoints: List<Offset>.from(pathPoints),
+                    metersPerPixel: metersPerPixel,
+                    projectileRadiusPx: 8,
+                    showGrid: true,
+                    rangeMeters: rangeMeters,
+                    maxHeightMeters: maxHeight,
+                  ),
+                  child: GestureDetector(
+                    onTapDown: (details) {
+                      // Tap to launch from tapped location? (optional) - For now just shows coordinates
+                      final local = details.localPosition;
+                      // convert to meters world if needed - skipping for now
+                    },
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(),
+                  ),
+                ),
+              );
+            }),
+          ),
+
+          // Middle: Controls & stats
+          Expanded(
+            flex: 4,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8),
+              child: Column(
+                children: [
+                  // Sliders row
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _buildLabeledSlider(
+                          label: 'Speed (m/s)',
+                          value: v0,
+                          min: 5,
+                          max: 80,
+                          onChanged: (val) {
+                            if (isLaunched) return; // prevent changing mid-flight
+                            setState(() => v0 = val);
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _buildLabeledSlider(
+                          label: 'Angle (°)',
+                          value: angleDeg,
+                          min: 5,
+                          max: 85,
+                          onChanged: (val) {
+                            if (isLaunched) return;
+                            setState(() => angleDeg = val);
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  // Buttons
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: isLaunched ? null : _launch,
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('Launch'),
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                      ),
+                      ElevatedButton.icon(
+                        onPressed: isLaunched ? _pauseResume : null,
+                        icon: Icon(isPaused ? Icons.play_arrow : Icons.pause),
+                        label: Text(isPaused ? 'Resume' : 'Pause'),
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+                      ),
+                      ElevatedButton.icon(
+                        onPressed: _reset,
+                        icon: const Icon(Icons.replay),
+                        label: const Text('Reset'),
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.blueGrey),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  // Stats
+                  Card(
+                    color: Colors.grey.shade800,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12.0),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _statItem('Time (s)', timeOfFlight.toStringAsFixed(2)),
+                          _statItem('Range (m)', rangeMeters.toStringAsFixed(2)),
+                          _statItem('Max H (m)', maxHeight.toStringAsFixed(2)),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  // Info text
+                  const Text(
+                    'Note: You cannot change speed/angle while launched. Use Reset to set new values.',
+                    style: TextStyle(color: Colors.white70),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
             ),
           ),
         ],
       ),
     );
   }
-}
 
-class _IntervalChip extends StatelessWidget {
-  final String label;
-  final int minutes;
-  final bool isSelected;
-  final VoidCallback onSelected;
+  Widget _buildLabeledSlider({
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('$label: ${value.toStringAsFixed(1)}', style: const TextStyle(color: Colors.white70)),
+        Slider(
+          value: value,
+          min: min,
+          max: max,
+          onChanged: onChanged,
+          activeColor: Colors.amber,
+          inactiveColor: Colors.white12,
+        ),
+      ],
+    );
+  }
 
-  const _IntervalChip({
-    required this.label,
-    required this.minutes,
-    required this.isSelected,
-    required this.onSelected,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return FilterChip(
-      label: Text(label),
-      selected: isSelected,
-      onSelected: (_) => onSelected(),
-      selectedColor: Colors.blue[700],
-      checkmarkColor: Colors.white,
-      labelStyle: TextStyle(
-        color: isSelected ? Colors.white : Colors.blue[700],
-        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-      ),
-      backgroundColor: Colors.blue[50],
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+  Widget _statItem(String title, String value) {
+    return Column(
+      children: [
+        Text(title, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+        const SizedBox(height: 6),
+        Text(value, style: const TextStyle(color: Colors.amberAccent, fontSize: 18, fontWeight: FontWeight.bold)),
+      ],
     );
   }
 }
 
-class WaterEntry {
-  final int amount;
-  final DateTime timestamp;
+class _ProjectilePainter extends CustomPainter {
+  final List<Offset> pathPoints; // in meters coordinates: (x, y)
+  final double metersPerPixel;
+  final int projectileRadiusPx;
+  final bool showGrid;
+  final double rangeMeters;
+  final double maxHeightMeters;
 
-  WaterEntry({
-    required this.amount,
-    required this.timestamp,
+  _ProjectilePainter({
+    required this.pathPoints,
+    required this.metersPerPixel,
+    this.projectileRadiusPx = 6,
+    this.showGrid = false,
+    required this.rangeMeters,
+    required this.maxHeightMeters,
   });
 
-  String get formattedTime {
-    final hour = timestamp.hour.toString().padLeft(2, '0');
-    final minute = timestamp.minute.toString().padLeft(2, '0');
-    return '$hour:$minute';
+  @override
+  void paint(Canvas canvas, Size size) {
+    // draw ground line
+    final paintGround = Paint()..color = Colors.white12;
+    final groundY = size.height - 8; // some bottom margin
+    canvas.drawLine(Offset(0, groundY), Offset(size.width, groundY), paintGround);
+
+    // transform world meters -> canvas coordinates:
+    // world origin (0,0) maps to (leftMargin, groundY)
+    final double leftMargin = 8;
+    final double originX = leftMargin;
+    final double originY = groundY;
+
+    // optional grid
+    if (showGrid) {
+      final Paint gridPaint = Paint()
+        ..color = Colors.white10
+        ..style = PaintingStyle.stroke;
+      final double stepMeters = max(1.0, (rangeMeters / 10.0).ceilToDouble());
+      final double stepPx = stepMeters / metersPerPixel;
+      for (double x = originX; x < size.width; x += stepPx) {
+        canvas.drawLine(Offset(x, 0), Offset(x, size.height), gridPaint);
+      }
+    }
+
+    // draw trajectory path
+    if (pathPoints.isNotEmpty) {
+      final Paint pathPaint = Paint()
+        ..color = Colors.amberAccent
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0;
+
+      final Path path = Path();
+
+      for (int i = 0; i < pathPoints.length; i++) {
+        final world = pathPoints[i];
+        final px = originX + world.dx / metersPerPixel;
+        final py = originY - world.dy / metersPerPixel;
+        if (i == 0) {
+          path.moveTo(px, py);
+        } else {
+          path.lineTo(px, py);
+        }
+      }
+
+      canvas.drawPath(path, pathPaint);
+
+      // draw projectile at last point
+      final last = pathPoints.last;
+      final px = originX + last.dx / metersPerPixel;
+      final py = originY - last.dy / metersPerPixel;
+      final Paint projPaint = Paint()..color = Colors.cyanAccent;
+      canvas.drawCircle(Offset(px, py), projectileRadiusPx.toDouble(), projPaint);
+      // glow
+      final Paint glow = Paint()..color = Colors.cyanAccent.withOpacity(0.25);
+      canvas.drawCircle(Offset(px, py), projectileRadiusPx.toDouble() * 2.4, glow);
+    }
+
+    // draw origin marker and labels
+    final textPainter = (String text, Color color, Offset at) {
+      final tp = TextPainter(
+        text: TextSpan(text: text, style: TextStyle(color: color, fontSize: 12)),
+        textDirection: TextDirection.ltr,
+      );
+      tp.layout();
+      tp.paint(canvas, at);
+    };
+
+    textPainter('Origin (0,0)', Colors.white54, Offset(originX + 4, originY + 6));
+    // display scale
+    textPainter('Scale: ${metersPerPixel.toStringAsFixed(2)} m/px', Colors.white54, Offset(10, 6));
   }
 
-  Map<String, dynamic> toJson() => {
-        'amount': amount,
-        'timestamp': timestamp.toIso8601String(),
-      };
-
-  factory WaterEntry.fromJson(Map<String, dynamic> json) => WaterEntry(
-        amount: json['amount'],
-        timestamp: DateTime.parse(json['timestamp']),
-      );
+  @override
+  bool shouldRepaint(covariant _ProjectilePainter oldDelegate) {
+    return oldDelegate.pathPoints != pathPoints || oldDelegate.metersPerPixel != metersPerPixel;
+  }
 }
